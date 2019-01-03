@@ -16,68 +16,100 @@
 	https://www.bluetooth.com/specifications/gatt/viewer?attributeXmlFile=org.bluetooth.characteristic.temperature_measurement.xml
  */
 
-import BLEClient from "bleclient";
+import BLEServer from "bleserver";
 import {uuid} from "btutils";
 import {IOCapability} from "sm";
+import Timer from "timer";
 
-const HTM_SERVICE_UUID = uuid`1809`;
-const TEMPERATURE_CHARACTERISTIC_UUID = uuid`2A1C`;
+const DEVICE_NAME = "LINE Things Trial M5Stack"
+// User service UUID: Change this to your generated service UUID
+const USER_SERVICE_UUID = "91E4E176-D0B9-464D-9FE4-52EE3E9F1552"
+// User service characteristics
+const WRITE_CHARACTERISTIC_UUID = "E9062E71-9E62-4BC6-B0D3-35CDCD9B027B"
+const NOTIFY_CHARACTERISTIC_UUID = "62FBD229-6EDD-4D1A-B554-5C4E1BB29169"
 
-class SecureHealthThermometerClient extends BLEClient {
+// PSDI Service UUID: Fixed value for Developer Trial
+const PSDI_SERVICE_UUID = "E625601E-9E55-4597-A598-76018A0D293D"
+const PSDI_CHARACTERISTIC_UUID = "26E2B12B-85F0-4F3F-9FDD-91D114270E6E"
+
+class SecureHealthThermometerServer extends BLEServer {
 	onReady() {
-		this.securityParameters = { mitm:true, ioCapability:IOCapability.DisplayOnly };
+		this.deviceName = DEVICE_NAME;
+		this.securityParameters = { mitm:false, ioCapability:IOCapability.NoInputOutput };
+		// this.securityParameters = { mitm:true, ioCapability:IOCapability.DisplayOnly };
 		//this.securityParameters = { mitm:true, ioCapability:IOCapability.KeyboardDisplay };
 		//this.securityParameters = { mitm:true, ioCapability:IOCapability.KeyboardOnly };
 		//this.securityParameters = { mitm:true, ioCapability:IOCapability.NoInputNoOutput };
+		//this.securityParameters = { ioCapability:IOCapability.NoInputNoOutput };
 		this.onDisconnected();
+		this.deploy();
 	}
-	onDiscovered(device) {
-		if ('Moddable HTM' == device.scanResponse.completeName) {
-			this.stopScanning();
-			this.connect(device);
-		}
+	onAuthenticated() {
+		this.authenticated = true;
+		if (this.characteristic)
+			this.startMeasurements();
 	}
-	onConnected(device) {
-		device.discoverPrimaryService(HTM_SERVICE_UUID);
+	onConnected() {
+		this.connected = true;
+		this.stopAdvertising();
 	}
 	onDisconnected() {
-		this.startScanning();
+		this.connected = false;
+		this.stopMeasurements();
+		this.startAdvertising({
+			advertisingData: {flags: 6, completeName: this.deviceName, completeUUID16List: [uuid`1809`, uuid`180F`]}
+		});
 	}
-	onServices(services) {
-		if (services.length)
-			services[0].discoverCharacteristic(TEMPERATURE_CHARACTERISTIC_UUID);
+	onCharacteristicNotifyEnabled(characteristic) {
+		this.characteristic = characteristic;
+		if (this.authenticated)
+			this.startMeasurements();
 	}
-	onCharacteristics(characteristics) {
-		if (characteristics.length)
-			characteristics[0].enableNotifications();
-	}
-	onCharacteristicNotification(characteristic, buffer) {
-		let bytes = new Uint8Array(buffer);
-		let units = bytes[0];
-		let temp = bytes[1] | (bytes[2] << 8) | (bytes[3] << 16) | (bytes[4] << 24);
-		let exponent = (temp >> 24) & 0xFF;
-		exponent = exponent & 0x80 ? -(~exponent + 257): exponent;
-		let mantissa = temp & 0xFFFFFF;
-		let value = (mantissa * Math.pow(10, exponent)).toFixed(2);
-		trace(`${value}\n`);
+	onCharacteristicNotifyDisabled(characteristic) {
+		this.stopMeasurements();
 	}
 	onPasskeyConfirm(params) {
 		let passkey = this.passkeyToString(params.passkey);
-		trace(`client confirm passkey: ${passkey}\n`);
+		trace(`server confirm passkey: ${passkey}\n`);
 		this.passkeyReply(params.address, true);
 	}
 	onPasskeyDisplay(params) {
 		let passkey = this.passkeyToString(params.passkey);
-		trace(`client display passkey: ${passkey}\n`);
+		trace(`server display passkey: ${passkey}\n`);
 	}
 	onPasskeyRequested(params) {
 		let passkey = Math.round(Math.random() * 999999);
-		trace(`client requested passkey: ${this.passkeyToString(passkey)}\n`);
+		trace(`server requested passkey: ${this.passkeyToString(passkey)}\n`);
 		return passkey;
+	}
+	get temperature() {
+		if (98.5 > this.temp)
+			this.temp += 0.1;
+		let flags = 0x01;		// fahrenheit
+		let exponent = 0xFD;	// -1
+		let mantissa = Math.round(this.temp * 1000);
+		let temp = (exponent << 24) | mantissa;		// IEEE-11073 32-bit float
+		let result = [flags, temp & 0xFF, (temp >> 8) & 0xFF, (temp >> 16) & 0xFF, (temp >> 24) & 0xFF];
+		return result;
+	}
+	startMeasurements() {
+		this.timer = Timer.repeat(id => {
+			if (this.characteristic)
+				this.notifyValue(this.characteristic, this.temperature);
+		}, 250);
+	}
+	stopMeasurements() {
+		if (this.timer) {
+			Timer.clear(this.timer);
+			delete this.timer;
+		}
+		delete this.characteristic;
+		this.temp = 95.0;
+		this.authenticated = false;
 	}
 	passkeyToString(passkey) {
 		return passkey.toString().padStart(6, "0");
 	}
 }
 
-let htm = new SecureHealthThermometerClient;
+let htm = new SecureHealthThermometerServer;
